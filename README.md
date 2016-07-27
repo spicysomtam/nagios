@@ -5,3 +5,4 @@ This is a collection of things I have written for Nagios. Actually I use Adagios
 ## Sub directories
   * plugins - native nagios server side plugins.
   * nrpe-plugins - client side nrpe plugins.
+  * sbin - useful sbin/admin nagios scripts.

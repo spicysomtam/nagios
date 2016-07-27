@@ -1,0 +1,216 @@
+#! /usr/bin/perl -w
+# $Id: check_ftp_rw,v 1.2 2011/07/06 14:17:10 root Exp root $
+
+#
+# Checks an ftp site
+#
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty
+# of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# you should have received a copy of the GNU General Public License
+# along with this program (or with Nagios);  if not, write to the
+# Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+# Boston, MA 02111-1307, USA
+
+# 2011 / v1.2 - Extended with support for SFTP (Steffen Poulsen)
+# A Munro 20 Apr 2016: sftp always assumes a password, but maybe you 
+# have keys setup without a passphrase, which means no password needed?
+# Hence if sftp and no password specified, don't specify password in 
+# the call to Net::SFTP::Foreign->new.
+
+use strict;
+use Getopt::Long;
+use Net::FTP;
+use Net::FTPSSL;
+use Net::SFTP::Foreign;
+use vars qw($PROGNAME);
+use lib "/usr/lib64/nagios/plugins" ;
+use utils qw (%ERRORS &print_revision &support);
+
+sub print_help ();
+sub print_usage ();
+
+my ($opt_host, $opt_user, $opt_pass, $opt_file, $opt_v, $opt_h, $opt_write, $opt_ssl, $opt_sftp, $opt_timeout, @opt_dirs) = 
+   ("",        "",        "",        "",       "");
+my $result;
+
+my $outstring="";
+
+$PROGNAME="check_ftp_rw";
+
+GetOptions(
+  "version"      => \$opt_v,
+  "help"         => \$opt_h,
+  "host=s"       => \$opt_host,
+  "user=s"       => \$opt_user,
+  "password=s"   => \$opt_pass,
+  "dir=s"        => \@opt_dirs,
+  "file=s"       => \$opt_file,
+  "write=s"      => \$opt_write,
+  "ssl"          => \$opt_ssl,
+  "sftp"         => \$opt_sftp,
+  "timeout=s"    => \$opt_timeout,
+  );
+
+if ($opt_v) {
+  print_revision($PROGNAME, '$Id: check_ftp_rw,v 1.2 2007/01/02 16:11:33 root Exp root $');
+  exit $ERRORS{'OK'};
+}
+
+if ($opt_h) {
+  print_help();
+  exit $ERRORS{'OK'};
+}
+
+unless ($opt_host) {
+  print "UNKNOWN: Must supply hostname with --host\n";
+  print_usage();
+  exit $ERRORS{'UNKNOWN'};
+}
+
+$result = 'OK';
+
+$opt_user    ||= "anonymous";
+#$opt_pass    ||= "nagios";
+$opt_pass    ||= "";
+$opt_timeout ||= 20;
+
+my $ftp;
+if ($opt_ssl) {
+  $ftp = Net::FTPSSL -> new($opt_host,
+    Debug => 0,
+    Encryption => EXP_CRYPT,
+    Croak => 0,
+    Timeout => $opt_timeout,
+    Passive => 1 #must be in passive mode to work
+  );
+} elsif ($opt_sftp) {
+  if ($opt_pass ne "") {
+    $ftp = Net::SFTP::Foreign->new($opt_host,
+      user => $opt_user,
+      timeout => $opt_timeout,
+      password => $opt_pass,
+#      more => [qw(-o PreferredAuthentications=keyboard-interactive)],
+      );
+    } else {
+    $ftp = Net::SFTP::Foreign->new($opt_host,
+      user => $opt_user,
+      timeout => $opt_timeout,
+#      more => [qw(-o PreferredAuthentications=keyboard-interactive)],
+      );
+    }
+    if ($ftp->status eq "Connection lost") {
+      $result="CRITICAL";
+      print "CRITICAL: SFTP connection timed out\n";
+      exit $ERRORS{$result};
+    }
+} else {
+  $ftp = Net::FTP -> new($opt_host,
+    Debug => 0,
+    Timeout => $opt_timeout,
+    Passive => 1 #must be in passive mode to work
+  );
+}
+
+unless ($ftp) {
+  $result="CRITICAL";
+  print "CRITICAL: Could not connect to host: $opt_host\n";
+  exit $ERRORS{$result};
+} else {
+  $outstring .="Connected to $opt_host";
+}
+
+if ((!$opt_sftp && !$ftp->login($opt_user, $opt_pass))) {
+  $result="CRITICAL";
+  print "CRITICAL: Could not login as user $opt_user\n";
+  exit $ERRORS{$result};
+} else {
+  $outstring .=", logged in as $opt_user";
+}
+
+if (scalar(@opt_dirs) > 0){
+  foreach (@opt_dirs) {
+    my $dir = $_;
+    my $chdir_ok = 0;
+    if ($opt_sftp) {
+      $chdir_ok = $ftp->setcwd($dir);
+    } else {
+      $chdir_ok = $ftp->cwd($dir);
+    }
+    unless ($chdir_ok) {
+      $result="CRITICAL";
+      print "CRITICAL: Could not chdir to $dir\n";
+      exit $ERRORS{$result};
+    } else {
+      $outstring .=", chdir'ed to $dir";
+    }
+  }
+}
+
+if ($opt_file ne ""){
+  my $filename = "/tmp/__check_ftp.nagios";
+  my $ok_get = $ftp->get($opt_file, $filename);
+  unlink $filename;
+  unless ($ok_get){
+    $result="CRITICAL";
+    print "CRITICAL: Could not get file: $opt_file\n";
+    exit $ERRORS{$result};
+  } else {
+    $outstring .=", downloaded $opt_file";
+  }
+}
+
+if ($opt_write){
+  my $remote_filename = $opt_write;
+  my $memfile = "Nagios test file (check_ftp_rw plugin).\n";
+  open(file_handle, "<", \$memfile);
+  unless ($ftp->put(\*file_handle, $remote_filename)){
+    $result="CRITICAL";
+    print "CRITICAL: Could not put file: $remote_filename\n";
+    exit $ERRORS{$result};
+  } else {
+    $outstring .=", uploaded $remote_filename";
+  }
+  close(file_handle);
+  if (!$opt_sftp && $remote_filename ne ""){
+    $ftp->delete($remote_filename);
+  } elsif ($opt_sftp) {
+    $ftp->remove($remote_filename);
+  }
+}
+
+print $outstring, "\n";
+exit $ERRORS{$result};
+
+sub print_usage () {
+  print "Usage:\n";
+  print "  $PROGNAME --host <host> [--timeout <seconds>][--user <user>][--password <password>][--dir <dir>][--file <file>][--write <file>][--ssl][--sftp]\n";
+  print "  $PROGNAME [--help]\n";
+  print "  $PROGNAME [--version]\n";
+}
+
+sub print_help () {
+  print_revision($PROGNAME, '$Id: check_ftp_rw,v 1.2 2007/01/02 16:11:33 root Exp root $');
+  print "Copyright (c) 2007 Paul Archer\n\n";
+  print_usage();
+  print "\n";
+  print "  --host     host to check\n";
+  print "  --user     username to use (uses 'anonymous' if user not given)\n";
+  print "  --password password to use (uses 'nagios' if password not given)\n";
+  print "  --timeout  timeout in seconds\n";
+  print "  --dir      cd to these remote directories\n";
+  print "  --file     remote filename to retrieve\n";
+  print "  --write    remote filename to put\n";
+  print "  --ssl      connect using FTPS instead of plain FTP (RFC4217) \n";
+  print "  --sftp     connect using SFTP instead of plain FTP (RFC4251) \n";
+  print "\n";
+  support();
+}
